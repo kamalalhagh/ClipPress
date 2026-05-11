@@ -1,0 +1,274 @@
+name: Build & Release — All Platforms
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ── Windows x64 ──────────────────────────────────────────────────────────
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install packages
+        run: python -m pip install customtkinter arabic-reshaper python-bidi pyinstaller --upgrade --quiet
+
+      - name: Download FFmpeg (Windows x64)
+        shell: pwsh
+        run: |
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $zip = "$env:TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          $entry   = $archive.Entries | Where-Object { $_.FullName -like "*/bin/ffmpeg.exe" } | Select-Object -First 1
+          if (-not $entry) { throw "ffmpeg.exe not found in ZIP" }
+          New-Item -ItemType Directory -Force -Path "assets" | Out-Null
+          [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "assets\ffmpeg.exe", $true)
+          $archive.Dispose()
+          Write-Host "Bundling: ffmpeg.exe ($([math]::Round((Get-Item 'assets\ffmpeg.exe').Length/1MB,1)) MB)"
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          $addData = ""
+          if (Test-Path "assets\ffmpeg.exe") { $addData += ' --add-binary "assets/ffmpeg.exe;."'; Write-Host "Bundling: ffmpeg.exe" }
+          if (Test-Path "assets")            { $addData += ' --add-data "assets;assets"' }
+          Invoke-Expression "python -m PyInstaller --onefile --windowed --name ClipPress-windows-x64 --clean$addData main.py"
+
+      - name: Verify
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/ClipPress-windows-x64.exe")) { Write-Error "EXE not found"; exit 1 }
+          Write-Host "OK: $([math]::Round((Get-Item 'dist/ClipPress-windows-x64.exe').Length/1MB,1)) MB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Windows-x64
+          path: dist/ClipPress-windows-x64.exe
+
+
+  # ── Windows ARM64 ─────────────────────────────────────────────────────────
+  windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: python -m pip install customtkinter arabic-reshaper python-bidi pyinstaller --upgrade --quiet
+
+      - name: Download FFmpeg (Windows ARM64)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-winarm64-gpl.zip"
+          $zip = "$env:TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          $entry   = $archive.Entries | Where-Object { $_.FullName -like "*/bin/ffmpeg.exe" } | Select-Object -First 1
+          if (-not $entry) { throw "ffmpeg.exe not found in ZIP" }
+          New-Item -ItemType Directory -Force -Path "assets" | Out-Null
+          [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "assets\ffmpeg.exe", $true)
+          $archive.Dispose()
+          Write-Host "Bundling: ffmpeg.exe ARM64 ($([math]::Round((Get-Item 'assets\ffmpeg.exe').Length/1MB,1)) MB)"
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          $addData = ""
+          if (Test-Path "assets\ffmpeg.exe") { $addData += ' --add-binary "assets/ffmpeg.exe;."'; Write-Host "Bundling: ffmpeg.exe" }
+          if (Test-Path "assets")            { $addData += ' --add-data "assets;assets"' }
+          Invoke-Expression "python -m PyInstaller --onefile --windowed --name ClipPress-windows-arm64 --clean$addData main.py"
+
+      - name: Verify
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/ClipPress-windows-arm64.exe")) { Write-Error "EXE not found"; exit 1 }
+          Write-Host "OK: $([math]::Round((Get-Item 'dist/ClipPress-windows-arm64.exe').Length/1MB,1)) MB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Windows-ARM64
+          path: dist/ClipPress-windows-arm64.exe
+
+
+  # ── macOS Apple Silicon (arm64) ───────────────────────────────────────────
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM Python + Tkinter
+        run: |
+          brew install python@3.12 python-tk@3.12
+          /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv .venv
+          .venv/bin/pip install customtkinter arabic-reshaper python-bidi pyinstaller --upgrade --quiet
+
+      - name: Download FFmpeg (macOS ARM64)
+        run: |
+          mkdir -p assets
+          .venv/bin/pip install imageio-ffmpeg --quiet
+          .venv/bin/python -c "import imageio_ffmpeg,shutil,os; src=imageio_ffmpeg.get_ffmpeg_exe(); shutil.copy(src,'assets/ffmpeg'); os.chmod('assets/ffmpeg',0o755); print('Bundling:',src,str(os.path.getsize('assets/ffmpeg')//1024//1024)+'MB')"
+
+      - name: Build arm64 binary
+        run: |
+          ADD_DATA=""
+          [ -f "assets/ffmpeg" ] && ADD_DATA="$ADD_DATA --add-binary assets/ffmpeg:." && echo "Bundling: ffmpeg"
+          [ -d "assets" ]        && ADD_DATA="$ADD_DATA --add-data assets:assets"
+          .venv/bin/python -m PyInstaller --onefile --name ClipPress_arm64 --clean $ADD_DATA main.py
+          # Fallback: some PyInstaller versions produce a .app instead of a flat binary
+          [ ! -f dist/ClipPress_arm64 ] && cp dist/ClipPress_arm64.app/Contents/MacOS/ClipPress_arm64 dist/ClipPress_arm64 || true
+          lipo -archs dist/ClipPress_arm64
+          cp dist/ClipPress_arm64 dist/ClipPress-macOS-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS-arm64
+          path: dist/ClipPress-macOS-arm64
+
+
+  # ── macOS Intel (x86_64) ──────────────────────────────────────────────────
+  macos-intel:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Rosetta 2
+        run: softwareupdate --install-rosetta --agree-to-license 2>/dev/null || true
+
+      - name: Install official Python 3.12 universal from python.org
+        run: |
+          curl -fsSL https://www.python.org/ftp/python/3.12.9/python-3.12.9-macos11.pkg -o /tmp/py.pkg
+          sudo installer -pkg /tmp/py.pkg -target /
+          arch -x86_64 /usr/local/bin/python3.12 -c "import platform; print(platform.machine())"
+
+      - name: Create x86_64 venv and install packages
+        run: |
+          arch -x86_64 /usr/local/bin/python3.12 -m venv .venv_x86
+          arch -x86_64 .venv_x86/bin/pip install customtkinter arabic-reshaper python-bidi pyinstaller --upgrade --quiet
+
+      - name: Download FFmpeg (macOS Intel)
+        run: |
+          mkdir -p assets
+          arch -x86_64 .venv_x86/bin/pip install imageio-ffmpeg --quiet
+          arch -x86_64 .venv_x86/bin/python -c "import imageio_ffmpeg,shutil,os; src=imageio_ffmpeg.get_ffmpeg_exe(); shutil.copy(src,'assets/ffmpeg'); os.chmod('assets/ffmpeg',0o755); print('Bundling:',src,str(os.path.getsize('assets/ffmpeg')//1024//1024)+'MB')"
+
+      - name: Build x86_64 binary
+        run: |
+          ADD_DATA=""
+          [ -f "assets/ffmpeg" ] && ADD_DATA="$ADD_DATA --add-binary assets/ffmpeg:." && echo "Bundling: ffmpeg"
+          [ -d "assets" ]        && ADD_DATA="$ADD_DATA --add-data assets:assets"
+          arch -x86_64 .venv_x86/bin/python -m PyInstaller --onefile --name ClipPress_x86_64 --clean $ADD_DATA main.py
+          [ ! -f dist/ClipPress_x86_64 ] && cp dist/ClipPress_x86_64.app/Contents/MacOS/ClipPress_x86_64 dist/ClipPress_x86_64 || true
+          lipo -archs dist/ClipPress_x86_64
+          cp dist/ClipPress_x86_64 dist/ClipPress-macOS-intel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS-Intel
+          path: dist/ClipPress-macOS-intel
+
+
+  # ── macOS Universal Binary (lipo arm64 + x86_64) ─────────────────────────
+  macos-universal:
+    needs: [macos-arm64, macos-intel]
+    runs-on: macos-latest
+    steps:
+      - name: Download arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: macOS-arm64
+          path: bins/
+
+      - name: Download Intel binary
+        uses: actions/download-artifact@v4
+        with:
+          name: macOS-Intel
+          path: bins/
+
+      - name: Combine into Universal Binary
+        run: |
+          chmod +x bins/ClipPress-macOS-arm64 bins/ClipPress-macOS-intel
+          lipo -create bins/ClipPress-macOS-arm64 bins/ClipPress-macOS-intel \
+               -output bins/ClipPress-macOS-universal
+          ARCHS=$(lipo -archs bins/ClipPress-macOS-universal)
+          echo "Universal archs: $ARCHS"
+          [[ "$ARCHS" == *"arm64"* ]] && [[ "$ARCHS" == *"x86_64"* ]] && echo "SUCCESS" || (echo "ERROR: $ARCHS" && exit 1)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS-Universal
+          path: bins/ClipPress-macOS-universal
+
+
+  # ── GitHub Release ────────────────────────────────────────────────────────
+  release:
+    needs: [windows-x64, windows-arm64, macos-arm64, macos-intel, macos-universal]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_files/
+
+      - name: List release files
+        run: find release_files/ -type f | sort
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "ClipPress ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## 🎬 ClipPress ${{ github.ref_name }}
+
+            Download for your platform — **FFmpeg is bundled, no extra setup needed.**
+
+            | Platform | File |
+            |----------|------|
+            | 🪟 Windows Intel / AMD | `ClipPress-windows-x64.exe` |
+            | 🪟 Windows ARM64 | `ClipPress-windows-arm64.exe` |
+            | 🍎 macOS Universal ✅ | `ClipPress-macOS-universal` — try this first |
+            | 🍎 macOS Apple Silicon | `ClipPress-macOS-arm64` — fallback |
+            | 🍎 macOS Intel | `ClipPress-macOS-intel` — fallback |
+
+            **macOS — run once after downloading:**
+            ```bash
+            chmod +x ClipPress-macOS-*
+            xattr -d com.apple.quarantine ClipPress-macOS-*
+            ```
+
+            | Level | Resolution | CRF | Best for |
+            |-------|------------|-----|----------|
+            | 🔥 Maximum | 720p  | 28 | Sharing  |
+            | ⚖️ Medium  | 1080p | 23 | General  |
+            | 🎵 Low     | 1080p | 18 | Archive  |
+          files: |
+            release_files/Windows-x64/ClipPress-windows-x64.exe
+            release_files/Windows-ARM64/ClipPress-windows-arm64.exe
+            release_files/macOS-Universal/ClipPress-macOS-universal
+            release_files/macOS-arm64/ClipPress-macOS-arm64
+            release_files/macOS-Intel/ClipPress-macOS-intel
